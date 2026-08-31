@@ -7,7 +7,7 @@ A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing F
 - Hide the text labels of **desktop shortcuts only**.
 - Optionally hide the names of **all desktop icons**.
 - Hide the standard shortcut arrow **on the desktop only**.
-- Real folders and normal files keep their names when shortcut-only hiding is used.
+- In shortcut-only mode, **only shortcuts lose their labels**.
 - Shortcut arrows remain visible in File Explorer.
 
 ### Default settings
@@ -21,6 +21,24 @@ A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing F
 If **Hide all desktop icon text** is enabled, it overrides the shortcut-only text option.
 
 A shortcut to a folder is still a shortcut, so its name is hidden when shortcut-only hiding is enabled.
+
+## Screenshots
+
+### Before
+
+![Desktop before enabling the mod](Screnshot/before.png)
+
+### Shortcut names and arrows hidden
+
+![Desktop with shortcut names and arrows hidden](Screnshot/Shortcut_text_and_arrow.png)
+
+### All desktop icon names hidden
+
+![Desktop with all icon names hidden](Screnshot/ALL.png)
+
+### File Explorer remains unchanged
+
+![File Explorer with normal shortcut arrows and names](Screnshot/Windows_explorer_untouched.png)
 
 ## Installation
 
