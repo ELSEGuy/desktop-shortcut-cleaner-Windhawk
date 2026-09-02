@@ -61,9 +61,13 @@ Windows updates can change Explorer internals, so future Windows builds may requ
 
 ## Credits
 
-Based in part on **Hide Desktop Icon Text and Shortcut Arrows** by **kivsak**.
+Based in part on **desktop icon text-hiding code by [kivsak](https://github.com/kivsak)**.
 
-The desktop detection and text-hiding approach were adapted from that mod. This project uses a different shortcut-arrow rendering implementation so the arrow is hidden on the desktop without being removed from File Explorer.
+The desktop detection and icon-label hiding approach were adapted from their script, which hides the names of all desktop icons.
+
+This project extends that approach with its own logic to hide labels **only for shortcuts**, while keeping labels visible for folders and other desktop items.
+
+The desktop-only shortcut-arrow handling is implemented separately by this project.
 
 ## License
 
