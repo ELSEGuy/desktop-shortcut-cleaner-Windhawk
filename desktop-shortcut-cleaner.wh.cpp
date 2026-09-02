@@ -28,10 +28,12 @@ Default settings:
 - Hide desktop shortcut arrows: ON
 
 Credits:
-Based in part on "Hide Desktop Icon Text and Shortcut Arrows" by kivsak.
-The desktop detection and text-hiding logic were adapted from that mod.
-This version uses a different arrow-rendering implementation so shortcut
-arrows remain visible in File Explorer.
+Based in part on desktop icon text-hiding code by kivsak.
+The desktop detection and icon-label hiding approach were adapted from their
+script, which hides the names of all desktop icons.
+This project extends that approach with its own shortcut-only label filtering.
+The desktop-only shortcut-arrow handling is implemented separately by this
+project.
 */
 // ==/WindhawkModReadme==
 
