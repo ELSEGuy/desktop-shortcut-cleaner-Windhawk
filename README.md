@@ -26,6 +26,11 @@ For shortcuts whose target has the *Run this program as an administrator* compat
 
 The glow is generated from each icon's own transparency: its outline is slightly widened, blurred and filled with white, then drawn underneath the icon, so only the halo outside the icon's shape is visible. The hover strength can be tuned with `kGlowHoverAlpha` in the source (0 = none, 255 = full).
 
+## Known limitations
+
+- Labels are matched by their displayed text, so a non-shortcut item showing the same name as a shortcut (for example `Notes.lnk` and `Notes.txt` with extensions hidden) loses its label too.
+- Shield hiding covers the *Run this program as an administrator* compatibility setting only. Shortcuts to programs whose manifest requests elevation (many installers) keep their shield, as do shortcuts whose target is on a network path.
+
 ## Screenshots
 
 ### Before
