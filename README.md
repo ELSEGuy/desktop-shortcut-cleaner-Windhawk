@@ -7,6 +7,7 @@ A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing F
 - Hide the text labels of **desktop shortcuts only**.
 - Optionally hide the names of **all desktop icons**.
 - Hide the standard shortcut arrow **on the desktop only**.
+- Hide the blue/yellow **UAC (admin) shield** on desktop shortcuts. It stays hidden after refreshing the desktop.
 - In shortcut-only mode, **only shortcuts lose their labels**.
 - Shortcut arrows remain visible in File Explorer.
 
@@ -17,10 +18,15 @@ A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing F
 | Hide desktop shortcut text | On |
 | Hide all desktop icon text | Off |
 | Hide desktop shortcut arrows | On |
+| Hide UAC shield on desktop shortcuts | On |
 
 If **Hide all desktop icon text** is enabled, it overrides the shortcut-only text option.
 
 A shortcut to a folder is still a shortcut, so its name is hidden when shortcut-only hiding is enabled.
+
+### About the UAC shield
+
+Windows bakes the shield into the shortcut's icon image (unlike the arrow, which is drawn on top), so the mod removes it at the source for shortcuts stored in your **Desktop** or **Public Desktop** folder. Those same shortcuts also show no shield if you open the Desktop folder in File Explorer; shortcuts anywhere else keep theirs. The shortcut still runs as administrator. Only the icon changes.
 
 ## Screenshots
 
@@ -49,7 +55,7 @@ Until the mod is available in the Windhawk catalog:
 3. Create a new mod.
 4. Replace the generated code with the contents of `desktop-shortcut-cleaner.wh.cpp`.
 5. Compile the mod.
-6. Enable it and configure the three toggles in **Settings**.
+6. Enable it and configure the toggles in **Settings**.
 
 ## Compatibility
 

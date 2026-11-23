@@ -2,13 +2,13 @@
 // @id              desktop-shortcut-cleaner
 // @name            Desktop Shortcut Cleaner
 // @description     Customize desktop icon labels and hide shortcut arrows on the Windows desktop only, without affecting File Explorer.
-// @version         1.0.0
+// @version         1.1.0
 // @author          ELSEGuy
 // @github          https://github.com/ELSEGuy
 // @license         MIT
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -lshlwapi -lcomctl32
+// @compilerOptions -lole32 -lshell32 -lshlwapi -lcomctl32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -19,6 +19,8 @@ Features:
 - Hides text only for shortcuts on the Windows desktop.
 - Optional toggle to hide the names of every desktop icon.
 - Hides the standard shortcut arrow only on the desktop.
+- Hides the blue/yellow UAC (admin) shield on desktop shortcuts, and keeps it
+  hidden after refreshing the desktop.
 - Real folders and normal files keep their names unless "Hide all desktop icon text" is enabled.
 - File Explorer remains unchanged.
 
@@ -26,6 +28,14 @@ Default settings:
 - Hide desktop shortcut text: ON
 - Hide all desktop icon text: OFF
 - Hide desktop shortcut arrows: ON
+- Hide UAC shield on desktop shortcuts: ON
+
+Note on the UAC shield: Windows bakes the shield into the shortcut's icon
+image (it is not a draw-time overlay like the arrow). The mod removes it at
+the source for shortcuts stored in your Desktop folder or the Public Desktop
+folder. Because of that, those same shortcuts also show no shield if you open
+the Desktop folder in File Explorer. Shortcuts anywhere else keep their shield.
+Shortcuts still run as administrator; only the icon changes.
 
 Credits:
 Based in part on desktop icon text-hiding code by kivsak.
@@ -50,6 +60,10 @@ project.
 - hide_arrows: true
   $name: Hide desktop shortcut arrows
   $description: Hide the standard shortcut arrow only while desktop icons are being painted. File Explorer stays unchanged.
+
+- hide_shield: true
+  $name: Hide UAC shield on desktop shortcuts
+  $description: Remove the blue/yellow admin shield from shortcuts in the Desktop and Public Desktop folders. Stays hidden after refreshing the desktop. The shortcut still runs as administrator.
 */
 // ==/WindhawkModSettings==
 
@@ -72,7 +86,11 @@ struct {
     bool hide_text;
     bool hide_all_text;
     bool hide_arrows;
+    bool hide_shield;
 } g_settings;
+
+std::wstring g_userDesktopDir;
+std::wstring g_publicDesktopDir;
 
 thread_local bool g_isDrawingDesktop = false;
 
@@ -393,6 +411,223 @@ static IImageList_Draw_t GetDesktopImageListDrawTarget() {
 }
 
 // ---------------------------------------------------------------------------
+// UAC shield removal
+//
+// The shield is not a draw-time overlay. When the shell asks a shortcut for
+// its icon (IExtractIconW::GetIconLocation), the shortcut returns GIL_SHIELD
+// if its target needs elevation, and the shell then composites the shield
+// into a separate system-image-list entry. Stripping it in IImageList::Draw
+// therefore can't work, and any desktop refresh re-extracts the icon and
+// brings the shield back.
+//
+// Fix it at the source: hook the ShellLink object's GetIconLocation and, for
+// shortcuts stored in a desktop folder, replace GIL_SHIELD with
+// GIL_FORCENOSHIELD.
+//
+// IExtractIconW vtable slots:
+//   0 QueryInterface
+//   1 AddRef
+//   2 Release
+//   3 GetIconLocation
+//   4 Extract
+// ---------------------------------------------------------------------------
+
+#ifndef GIL_SHIELD
+#define GIL_SHIELD 0x0200
+#endif
+
+#ifndef GIL_FORCENOSHIELD
+#define GIL_FORCENOSHIELD 0x0400
+#endif
+
+static const GUID kClsidShellLink = {
+    0x00021401, 0x0000, 0x0000,
+    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static const GUID kIidExtractIconW = {
+    0x000214FA, 0x0000, 0x0000,
+    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static const GUID kIidPersistFile = {
+    0x0000010B, 0x0000, 0x0000,
+    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static const GUID kFolderIdDesktop = {
+    0xB4BFCC3A, 0xDB2C, 0x424C,
+    {0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41}
+};
+
+static const GUID kFolderIdPublicDesktop = {
+    0xC4AA340D, 0xF20F, 0x4863,
+    {0xAF, 0xEF, 0xF8, 0x7E, 0xF2, 0xE6, 0xBA, 0x25}
+};
+
+static std::wstring GetKnownFolder(REFKNOWNFOLDERID id) {
+    std::wstring result;
+    PWSTR path = nullptr;
+
+    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &path)) &&
+        path) {
+        result = path;
+    }
+
+    CoTaskMemFree(path);
+    return result;
+}
+
+static void ResolveDesktopFolders() {
+    g_userDesktopDir = GetKnownFolder(kFolderIdDesktop);
+    g_publicDesktopDir = GetKnownFolder(kFolderIdPublicDesktop);
+
+    Wh_Log(L"Desktop folders: user=%s public=%s",
+           g_userDesktopDir.c_str(),
+           g_publicDesktopDir.c_str());
+}
+
+static bool IsDirectlyInFolder(const std::wstring& filePath,
+                               const std::wstring& folder) {
+    if (folder.empty() || filePath.size() <= folder.size() + 1) {
+        return false;
+    }
+
+    if (_wcsnicmp(filePath.c_str(), folder.c_str(), folder.size()) != 0) {
+        return false;
+    }
+
+    if (filePath[folder.size()] != L'\\') {
+        return false;
+    }
+
+    // Only items directly inside the folder, not in subfolders.
+    return filePath.find(L'\\', folder.size() + 1) == std::wstring::npos;
+}
+
+static bool IsDesktopShortcut(IExtractIconW* self) {
+    IPersistFile* persistFile = nullptr;
+
+    if (FAILED(self->QueryInterface(
+            kIidPersistFile,
+            reinterpret_cast<void**>(&persistFile))) ||
+        !persistFile) {
+        return false;
+    }
+
+    bool result = false;
+    LPOLESTR fileName = nullptr;
+
+    if (persistFile->GetCurFile(&fileName) == S_OK && fileName) {
+        std::wstring path = fileName;
+        result = IsDirectlyInFolder(path, g_userDesktopDir) ||
+                 IsDirectlyInFolder(path, g_publicDesktopDir);
+    }
+
+    CoTaskMemFree(fileName);
+    persistFile->Release();
+
+    return result;
+}
+
+using ExtractIconW_GetIconLocation_t =
+    HRESULT(STDMETHODCALLTYPE*)(IExtractIconW*,
+                                UINT,
+                                PWSTR,
+                                UINT,
+                                int*,
+                                UINT*);
+
+ExtractIconW_GetIconLocation_t ShellLink_GetIconLocation_Original = nullptr;
+
+HRESULT STDMETHODCALLTYPE ShellLink_GetIconLocation_Hook(
+    IExtractIconW* self,
+    UINT flags,
+    PWSTR iconFile,
+    UINT iconFileSize,
+    int* index,
+    UINT* outFlags) {
+
+    HRESULT hr = ShellLink_GetIconLocation_Original(
+        self, flags, iconFile, iconFileSize, index, outFlags);
+
+    if (SUCCEEDED(hr) &&
+        g_settings.hide_shield &&
+        outFlags &&
+        IsDesktopShortcut(self)) {
+        // Set GIL_FORCENOSHIELD even when GIL_SHIELD wasn't returned, so
+        // the shell doesn't add a shield on its own either.
+        *outFlags = (*outFlags & ~GIL_SHIELD) | GIL_FORCENOSHIELD;
+    }
+
+    return hr;
+}
+
+static ExtractIconW_GetIconLocation_t GetShellLinkGetIconLocationTarget() {
+    HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    ExtractIconW_GetIconLocation_t target = nullptr;
+    IExtractIconW* extractIcon = nullptr;
+
+    if (SUCCEEDED(CoCreateInstance(
+            kClsidShellLink,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            kIidExtractIconW,
+            reinterpret_cast<void**>(&extractIcon))) &&
+        extractIcon) {
+
+        void** vtable = *reinterpret_cast<void***>(extractIcon);
+        if (vtable && vtable[3]) {
+            target = reinterpret_cast<ExtractIconW_GetIconLocation_t>(
+                vtable[3]);
+        }
+
+        extractIcon->Release();
+    } else {
+        Wh_Log(L"Couldn't create a ShellLink IExtractIconW instance");
+    }
+
+    if (SUCCEEDED(initHr)) {
+        CoUninitialize();
+    }
+
+    return target;
+}
+
+// Tell the shell to re-extract the icon of every shortcut in the desktop
+// folders, so the change applies without a manual refresh.
+static void NotifyDesktopShortcutsChanged() {
+    for (const std::wstring* folder : {&g_userDesktopDir, &g_publicDesktopDir}) {
+        if (folder->empty()) {
+            continue;
+        }
+
+        std::wstring pattern = *folder + L"\\*.lnk";
+
+        WIN32_FIND_DATAW findData;
+        HANDLE find = FindFirstFileW(pattern.c_str(), &findData);
+        if (find == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        do {
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                continue;
+            }
+
+            std::wstring path = *folder + L"\\" + findData.cFileName;
+            SHChangeNotify(SHCNE_UPDATEITEM,
+                           SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                           path.c_str(),
+                           nullptr);
+        } while (FindNextFileW(find, &findData));
+
+        FindClose(find);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Desktop subclass
 // ---------------------------------------------------------------------------
 
@@ -558,6 +793,9 @@ static void LoadSettings() {
 
     g_settings.hide_arrows =
         Wh_GetIntSetting(L"hide_arrows") != 0;
+
+    g_settings.hide_shield =
+        Wh_GetIntSetting(L"hide_shield") != 0;
 }
 
 BOOL Wh_ModInit() {
@@ -604,6 +842,20 @@ BOOL Wh_ModInit() {
         }
     }
 
+    if (g_settings.hide_shield) {
+        ResolveDesktopFolders();
+
+        if (ExtractIconW_GetIconLocation_t target =
+                GetShellLinkGetIconLocationTarget()) {
+            WindhawkUtils::SetFunctionHook(
+                target,
+                ShellLink_GetIconLocation_Hook,
+                &ShellLink_GetIconLocation_Original);
+        } else {
+            Wh_Log(L"Couldn't resolve ShellLink GetIconLocation target");
+        }
+    }
+
     return TRUE;
 }
 
@@ -617,6 +869,10 @@ void Wh_ModAfterInit() {
         InvalidateRect(desktop, nullptr, TRUE);
         UpdateWindow(desktop);
     }
+
+    if (g_settings.hide_shield) {
+        NotifyDesktopShortcutsChanged();
+    }
 }
 
 void Wh_ModUninit() {
@@ -626,6 +882,11 @@ void Wh_ModUninit() {
             DesktopListSubclass);
 
         InvalidateRect(desktop, nullptr, TRUE);
+    }
+
+    if (g_settings.hide_shield) {
+        // Let the shields come back when the mod is disabled.
+        NotifyDesktopShortcutsChanged();
     }
 }
 
