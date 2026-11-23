@@ -2,6 +2,8 @@
 
 A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing File Explorer**.
 
+![Hover and selection glow on desktop icons](Screnshot/glow_demo.gif)
+
 ## Features
 
 - Hide the text labels of **desktop shortcuts only**.
@@ -41,10 +43,6 @@ The glow is generated from each icon's own transparency: its outline is slightly
 ### File Explorer remains unchanged
 
 ![File Explorer with normal shortcut arrows and names](Screnshot/Windows_explorer_untouched.png)
-
-### Hover and selection glow
-
-![Hover and selection glow on desktop icons](Screnshot/glow_demo.gif)
 
 ## Installation
 
