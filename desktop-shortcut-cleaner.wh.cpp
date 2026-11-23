@@ -1,14 +1,14 @@
 // ==WindhawkMod==
 // @id              desktop-shortcut-cleaner
 // @name            Desktop Shortcut Cleaner
-// @description     Customize desktop icon labels and hide shortcut arrows on the Windows desktop only, without affecting File Explorer.
-// @version         1.1.0
+// @description     Customize desktop icon labels, shortcut arrows, and administrator shields on the Windows desktop without changing File Explorer.
+// @version         1.1.2
 // @author          ELSEGuy
 // @github          https://github.com/ELSEGuy
 // @license         MIT
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lole32 -lshell32 -lshlwapi -lcomctl32
+// @compilerOptions -lole32 -lshlwapi -lcomctl32 -lshell32 -ladvapi32 -luser32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -19,23 +19,10 @@ Features:
 - Hides text only for shortcuts on the Windows desktop.
 - Optional toggle to hide the names of every desktop icon.
 - Hides the standard shortcut arrow only on the desktop.
-- Hides the blue/yellow UAC (admin) shield on desktop shortcuts, and keeps it
-  hidden after refreshing the desktop.
-- Real folders and normal files keep their names unless "Hide all desktop icon text" is enabled.
+- Hides the UAC (admin) shield on desktop shortcuts whose target uses the
+  "Run this program as an administrator" compatibility setting, by drawing
+  the raw icon instead. Stays hidden after refreshing the desktop.
 - File Explorer remains unchanged.
-
-Default settings:
-- Hide desktop shortcut text: ON
-- Hide all desktop icon text: OFF
-- Hide desktop shortcut arrows: ON
-- Hide UAC shield on desktop shortcuts: ON
-
-Note on the UAC shield: Windows bakes the shield into the shortcut's icon
-image (it is not a draw-time overlay like the arrow). The mod removes it at
-the source for shortcuts stored in your Desktop folder or the Public Desktop
-folder. Because of that, those same shortcuts also show no shield if you open
-the Desktop folder in File Explorer. Shortcuts anywhere else keep their shield.
-Shortcuts still run as administrator; only the icon changes.
 
 Credits:
 Based in part on desktop icon text-hiding code by kivsak.
@@ -61,9 +48,10 @@ project.
   $name: Hide desktop shortcut arrows
   $description: Hide the standard shortcut arrow only while desktop icons are being painted. File Explorer stays unchanged.
 
-- hide_shield: true
-  $name: Hide UAC shield on desktop shortcuts
-  $description: Remove the blue/yellow admin shield from shortcuts in the Desktop and Public Desktop folders. Stays hidden after refreshing the desktop. The shortcut still runs as administrator.
+- hide_admin_shields: true
+  $name: Hide desktop administrator shields
+  $description: On the desktop only, draw the raw icon for shortcuts whose target uses the "Run as administrator" compatibility setting. The shortcut still runs as administrator.
+
 */
 // ==/WindhawkModSettings==
 
@@ -74,9 +62,13 @@ project.
 #include <commoncontrols.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <uxtheme.h>
 
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Settings / state
@@ -86,11 +78,8 @@ struct {
     bool hide_text;
     bool hide_all_text;
     bool hide_arrows;
-    bool hide_shield;
+    bool hide_shields;
 } g_settings;
-
-std::wstring g_userDesktopDir;
-std::wstring g_publicDesktopDir;
 
 thread_local bool g_isDrawingDesktop = false;
 
@@ -98,6 +87,32 @@ std::unordered_set<std::wstring> g_shortcutNames;
 DWORD g_lastShortcutCacheTick = 0;
 
 UINT g_linkOverlayMask = 0;
+int g_linkOverlaySlot = 0;
+
+HIMAGELIST g_cleanShieldImageList = nullptr;
+std::unordered_map<int, int> g_cleanIconBySystemImage;
+DWORD g_lastShieldCacheTick = 0;
+HIMAGELIST g_cachedDesktopSystemImageList = nullptr;
+int g_cachedDesktopIconWidth = 0;
+int g_cachedDesktopIconHeight = 0;
+int g_cachedDesktopItemCount = -1;
+// System-image index of every desktop item when the map was last built.
+// Explorer assigns real icon indexes asynchronously after a refresh, so the
+// map must be rebuilt whenever any of these change, not only the item count.
+std::vector<int> g_cachedDesktopImageSignature;
+
+// Timer used to retry a shield-map rebuild that was throttled, so the map is
+// corrected even if nothing repaints the desktop afterwards.
+constexpr UINT_PTR kShieldRefreshTimerId = 0x57484B53;
+constexpr UINT kShieldRefreshThrottleMs = 250;
+constexpr UINT kShieldRefreshRetryMs = 300;
+
+SRWLOCK g_cleanShieldCacheLock = SRWLOCK_INIT;
+volatile LONG g_shieldCacheUpdateInProgress = 0;
+volatile LONG g_shieldCacheGeneration = 0;
+volatile LONG g_isUnloading = 0;
+
+thread_local bool g_isDrawingCleanShieldIcon = false;
 
 // ---------------------------------------------------------------------------
 // Desktop window helpers
@@ -205,8 +220,7 @@ static void UpdateShortcutCache() {
 
         while (enumerator->Next(1, &pidl, nullptr) == S_OK) {
             SFGAOF attributes = SFGAO_LINK;
-
-           LPCITEMIDLIST pidlConst = pidl;
+            LPCITEMIDLIST pidlConst = pidl;
 
             if (SUCCEEDED(desktop->GetAttributesOf(
                     1,
@@ -214,7 +228,7 @@ static void UpdateShortcutCache() {
                     &attributes)) &&
                 (attributes & SFGAO_LINK)) {
 
-                STRRET str;
+                STRRET str = {};
                 if (SUCCEEDED(desktop->GetDisplayNameOf(
                         pidl,
                         SHGDN_NORMAL,
@@ -232,6 +246,7 @@ static void UpdateShortcutCache() {
             }
 
             CoTaskMemFree(pidl);
+            pidl = nullptr;
         }
 
         enumerator->Release();
@@ -295,6 +310,7 @@ static bool ResolveLinkOverlayMask() {
     }
 
     g_linkOverlayMask = INDEXTOOVERLAYMASK(overlayIndex);
+    g_linkOverlaySlot = overlayIndex;
     Wh_Log(L"Standard link overlay index=%d mask=0x%X",
            overlayIndex,
            g_linkOverlayMask);
@@ -303,19 +319,680 @@ static bool ResolveLinkOverlayMask() {
 }
 
 // ---------------------------------------------------------------------------
-// IImageList::Draw hook
+// Raw-icon cache for RUNASADMIN desktop shortcuts
 //
-// IImageList derives from IUnknown.
-// Vtable slots:
-//   0 QueryInterface
-//   1 AddRef
-//   2 Release
-//   3 Add
-//   4 ReplaceIcon
-//   5 SetOverlayImage
-//   6 Replace
-//   7 AddMasked
-//   8 Draw
+// Explorer's UAC shield is already present in the cached system-image-list
+// bitmap for this compatibility case. Instead of modifying that shared cache,
+// this experiment extracts the shortcut's raw icon and substitutes it only
+// while the desktop ListView is painting.
+// ---------------------------------------------------------------------------
+
+static const GUID kCLSID_ShellLink = {
+    0x00021401,
+    0x0000,
+    0x0000,
+    {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static const GUID kIID_IShellLinkW = {
+    0x000214f9,
+    0x0000,
+    0x0000,
+    {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static const GUID kIID_IPersistFile = {
+    0x0000010b,
+    0x0000,
+    0x0000,
+    {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+static std::wstring ExpandPath(const WCHAR* path) {
+    if (!path || !path[0]) {
+        return {};
+    }
+
+    WCHAR expanded[32768];
+    DWORD length = ExpandEnvironmentStringsW(
+        path,
+        expanded,
+        ARRAYSIZE(expanded));
+
+    if (length > 0 && length <= ARRAYSIZE(expanded)) {
+        return expanded;
+    }
+
+    return path;
+}
+
+static bool RegistryLayerContainsRunAsAdmin(
+    HKEY root,
+    REGSAM view,
+    const std::wstring& targetPath) {
+
+    static constexpr WCHAR kLayersKey[] =
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\"
+        L"AppCompatFlags\\Layers";
+
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(
+            root,
+            kLayersKey,
+            0,
+            KEY_QUERY_VALUE | view,
+            &key) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    WCHAR data[2048] = {};
+    DWORD type = 0;
+    DWORD bytes = sizeof(data);
+
+    LSTATUS status = RegQueryValueExW(
+        key,
+        targetPath.c_str(),
+        nullptr,
+        &type,
+        reinterpret_cast<BYTE*>(data),
+        &bytes);
+
+    RegCloseKey(key);
+
+    if (status != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ)) {
+        return false;
+    }
+
+    data[ARRAYSIZE(data) - 1] = L'\0';
+    return StrStrIW(data, L"RUNASADMIN") != nullptr;
+}
+
+static bool TargetUsesRunAsAdminLayer(const std::wstring& targetPath) {
+    if (targetPath.empty()) {
+        return false;
+    }
+
+    if (RegistryLayerContainsRunAsAdmin(
+            HKEY_CURRENT_USER,
+            0,
+            targetPath) ||
+        RegistryLayerContainsRunAsAdmin(
+            HKEY_LOCAL_MACHINE,
+            0,
+            targetPath)) {
+        return true;
+    }
+
+#ifdef _WIN64
+    if (RegistryLayerContainsRunAsAdmin(
+            HKEY_CURRENT_USER,
+            KEY_WOW64_32KEY,
+            targetPath) ||
+        RegistryLayerContainsRunAsAdmin(
+            HKEY_LOCAL_MACHINE,
+            KEY_WOW64_32KEY,
+            targetPath)) {
+        return true;
+    }
+#endif
+
+    return false;
+}
+
+static bool ReadShortcutIconInfo(
+    const std::wstring& shortcutPath,
+    std::wstring* targetPath,
+    std::wstring* iconPath,
+    int* iconIndex) {
+
+    IShellLinkW* shellLink = nullptr;
+    HRESULT result = CoCreateInstance(
+        kCLSID_ShellLink,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        kIID_IShellLinkW,
+        reinterpret_cast<void**>(&shellLink));
+
+    if (FAILED(result) || !shellLink) {
+        return false;
+    }
+
+    IPersistFile* persistFile = nullptr;
+    result = shellLink->QueryInterface(
+        kIID_IPersistFile,
+        reinterpret_cast<void**>(&persistFile));
+
+    if (FAILED(result) || !persistFile) {
+        shellLink->Release();
+        return false;
+    }
+
+    result = persistFile->Load(shortcutPath.c_str(), STGM_READ);
+    persistFile->Release();
+
+    if (FAILED(result)) {
+        shellLink->Release();
+        return false;
+    }
+
+    WCHAR target[MAX_PATH] = {};
+    result = shellLink->GetPath(
+        target,
+        ARRAYSIZE(target),
+        nullptr,
+        SLGP_RAWPATH);
+
+    if (FAILED(result) || !target[0]) {
+        shellLink->Release();
+        return false;
+    }
+
+    WCHAR icon[MAX_PATH] = {};
+    int index = 0;
+    if (FAILED(shellLink->GetIconLocation(
+            icon,
+            ARRAYSIZE(icon),
+            &index))) {
+        icon[0] = L'\0';
+        index = 0;
+    }
+
+    shellLink->Release();
+
+    *targetPath = ExpandPath(target);
+    *iconPath = icon[0] ? ExpandPath(icon) : *targetPath;
+    *iconIndex = icon[0] ? index : 0;
+
+    if (PathIsRelativeW(iconPath->c_str())) {
+        WCHAR shortcutDirectory[MAX_PATH];
+        wcsncpy_s(
+            shortcutDirectory,
+            ARRAYSIZE(shortcutDirectory),
+            shortcutPath.c_str(),
+            _TRUNCATE);
+        PathRemoveFileSpecW(shortcutDirectory);
+
+        WCHAR combined[MAX_PATH];
+        if (PathCombineW(
+                combined,
+                shortcutDirectory,
+                iconPath->c_str())) {
+            *iconPath = combined;
+        }
+    }
+
+    return true;
+}
+
+static bool ShellDisplayNameToString(
+    IShellFolder* folder,
+    LPCITEMIDLIST pidl,
+    SHGDNF flags,
+    std::wstring* value) {
+
+    STRRET str = {};
+    if (FAILED(folder->GetDisplayNameOf(pidl, flags, &str))) {
+        return false;
+    }
+
+    WCHAR buffer[32768];
+    if (FAILED(StrRetToBufW(
+            &str,
+            pidl,
+            buffer,
+            ARRAYSIZE(buffer)))) {
+        return false;
+    }
+
+    *value = buffer;
+    return true;
+}
+
+static HICON ExtractRawShortcutIcon(
+    const std::wstring& iconPath,
+    int iconIndex,
+    const std::wstring& targetPath,
+    int width,
+    int height) {
+
+    HICON icon = nullptr;
+    UINT resourceId = 0;
+
+    UINT extracted = PrivateExtractIconsW(
+        iconPath.c_str(),
+        iconIndex,
+        width,
+        height,
+        &icon,
+        &resourceId,
+        1,
+        LR_DEFAULTCOLOR);
+
+    if (extracted == 1 && icon) {
+        return icon;
+    }
+
+    if (_wcsicmp(iconPath.c_str(), targetPath.c_str()) != 0) {
+        icon = nullptr;
+        extracted = PrivateExtractIconsW(
+            targetPath.c_str(),
+            0,
+            width,
+            height,
+            &icon,
+            &resourceId,
+            1,
+            LR_DEFAULTCOLOR);
+
+        if (extracted == 1 && icon) {
+            return icon;
+        }
+    }
+
+    return nullptr;
+}
+
+class ScopedShieldCacheUpdate {
+public:
+    ScopedShieldCacheUpdate()
+        : m_acquired(InterlockedCompareExchange(
+              &g_shieldCacheUpdateInProgress,
+              1,
+              0) == 0) {
+    }
+
+    ~ScopedShieldCacheUpdate() {
+        if (m_acquired) {
+            InterlockedExchange(&g_shieldCacheUpdateInProgress, 0);
+        }
+    }
+
+    bool IsAcquired() const {
+        return m_acquired;
+    }
+
+private:
+    bool m_acquired;
+};
+
+static void ClearShieldedShortcutIconCache() {
+    InterlockedIncrement(&g_shieldCacheGeneration);
+
+    AcquireSRWLockExclusive(&g_cleanShieldCacheLock);
+
+    HIMAGELIST oldImageList = g_cleanShieldImageList;
+    g_cleanShieldImageList = nullptr;
+    g_cleanIconBySystemImage.clear();
+    g_lastShieldCacheTick = 0;
+    g_cachedDesktopSystemImageList = nullptr;
+    g_cachedDesktopIconWidth = 0;
+    g_cachedDesktopIconHeight = 0;
+    g_cachedDesktopItemCount = -1;
+    g_cachedDesktopImageSignature.clear();
+
+    ReleaseSRWLockExclusive(&g_cleanShieldCacheLock);
+
+    if (oldImageList) {
+        ImageList_Destroy(oldImageList);
+    }
+}
+
+static std::vector<int> GetDesktopImageSignature(HWND desktopView) {
+    int itemCount = ListView_GetItemCount(desktopView);
+
+    std::vector<int> signature;
+    signature.reserve(itemCount > 0 ? itemCount : 0);
+
+    for (int itemIndex = 0; itemIndex < itemCount; itemIndex++) {
+        LVITEMW item = {};
+        item.mask = LVIF_IMAGE;
+        item.iItem = itemIndex;
+
+        if (!SendMessageW(desktopView,
+                          LVM_GETITEMW,
+                          0,
+                          reinterpret_cast<LPARAM>(&item))) {
+            item.iImage = -1;
+        }
+
+        signature.push_back(item.iImage);
+    }
+
+    return signature;
+}
+
+static bool ShieldIconCacheNeedsRefresh(HWND desktopView) {
+    HIMAGELIST currentImageList =
+        ListView_GetImageList(desktopView, LVSIL_NORMAL);
+    int currentWidth = 0;
+    int currentHeight = 0;
+
+    if (!currentImageList ||
+        !ImageList_GetIconSize(
+            currentImageList,
+            &currentWidth,
+            &currentHeight)) {
+        return true;
+    }
+
+    int currentItemCount = ListView_GetItemCount(desktopView);
+
+    AcquireSRWLockShared(&g_cleanShieldCacheLock);
+    bool needsRefresh =
+        !g_cleanShieldImageList ||
+        currentImageList != g_cachedDesktopSystemImageList ||
+        currentWidth != g_cachedDesktopIconWidth ||
+        currentHeight != g_cachedDesktopIconHeight ||
+        currentItemCount != g_cachedDesktopItemCount;
+    ReleaseSRWLockShared(&g_cleanShieldCacheLock);
+
+    if (needsRefresh) {
+        return true;
+    }
+
+    std::vector<int> signature = GetDesktopImageSignature(desktopView);
+
+    AcquireSRWLockShared(&g_cleanShieldCacheLock);
+    needsRefresh = signature != g_cachedDesktopImageSignature;
+    ReleaseSRWLockShared(&g_cleanShieldCacheLock);
+
+    return needsRefresh;
+}
+
+// Returns false if the rebuild was skipped (throttled or already running),
+// so the caller can retry later.
+static bool UpdateShieldedShortcutIconCache(bool force = false) {
+    if (InterlockedCompareExchange(&g_isUnloading, 0, 0) != 0) {
+        return true;
+    }
+
+    ScopedShieldCacheUpdate updateGuard;
+    if (!updateGuard.IsAcquired()) {
+        return false;
+    }
+
+    DWORD now = GetTickCount();
+
+    AcquireSRWLockShared(&g_cleanShieldCacheLock);
+    DWORD lastUpdate = g_lastShieldCacheTick;
+    ReleaseSRWLockShared(&g_cleanShieldCacheLock);
+
+    if (!force &&
+        lastUpdate != 0 &&
+        now - lastUpdate < kShieldRefreshThrottleMs) {
+        return false;
+    }
+
+    LONG cacheGeneration =
+        InterlockedCompareExchange(&g_shieldCacheGeneration, 0, 0);
+
+    AcquireSRWLockExclusive(&g_cleanShieldCacheLock);
+    g_lastShieldCacheTick = now;
+    ReleaseSRWLockExclusive(&g_cleanShieldCacheLock);
+
+    HWND desktopView = GetDesktopFolderView();
+    if (!desktopView) {
+        return true;
+    }
+
+    HIMAGELIST systemImageList =
+        ListView_GetImageList(desktopView, LVSIL_NORMAL);
+
+    int iconWidth = 0;
+    int iconHeight = 0;
+    if (!systemImageList ||
+        !ImageList_GetIconSize(
+            systemImageList,
+            &iconWidth,
+            &iconHeight) ||
+        iconWidth <= 0 ||
+        iconHeight <= 0) {
+        Wh_Log(L"Couldn't determine the desktop icon size");
+        return true;
+    }
+
+    HIMAGELIST freshImageList = ImageList_Create(
+        iconWidth,
+        iconHeight,
+        ILC_COLOR32 | ILC_MASK,
+        1,
+        4);
+
+    if (!freshImageList) {
+        Wh_Log(L"Couldn't create the raw desktop icon list");
+        return true;
+    }
+
+    // Preserve any normal overlay requested by the desktop draw call. The
+    // shortcut arrow is deliberately omitted when that setting is enabled.
+    auto systemImageListInterface =
+        reinterpret_cast<IImageList*>(systemImageList);
+
+    for (int overlaySlot = 1; overlaySlot <= 15; overlaySlot++) {
+        if (g_settings.hide_arrows &&
+            overlaySlot == g_linkOverlaySlot) {
+            continue;
+        }
+
+        int overlayImageIndex = -1;
+        if (FAILED(systemImageListInterface->GetOverlayImage(
+                overlaySlot,
+                &overlayImageIndex)) ||
+            overlayImageIndex < 0) {
+            continue;
+        }
+
+        HICON overlayIcon = ImageList_GetIcon(
+            systemImageList,
+            overlayImageIndex,
+            ILD_TRANSPARENT);
+
+        if (!overlayIcon) {
+            continue;
+        }
+
+        int privateOverlayIndex = ImageList_AddIcon(
+            freshImageList,
+            overlayIcon);
+        DestroyIcon(overlayIcon);
+
+        if (privateOverlayIndex >= 0) {
+            ImageList_SetOverlayImage(
+                freshImageList,
+                privateOverlayIndex,
+                overlaySlot);
+        }
+    }
+
+    std::unordered_map<std::wstring, int> cleanIndexByName;
+
+    IShellFolder* desktopFolder = nullptr;
+    if (SUCCEEDED(SHGetDesktopFolder(&desktopFolder)) &&
+        desktopFolder) {
+
+        IEnumIDList* enumerator = nullptr;
+        if (SUCCEEDED(desktopFolder->EnumObjects(
+                nullptr,
+                SHCONTF_FOLDERS | SHCONTF_NONFOLDERS,
+                &enumerator)) &&
+            enumerator) {
+
+            LPITEMIDLIST pidl = nullptr;
+            while (enumerator->Next(1, &pidl, nullptr) == S_OK) {
+                SFGAOF attributes = SFGAO_LINK;
+                LPCITEMIDLIST pidlConst = pidl;
+
+                bool isLink =
+                    SUCCEEDED(desktopFolder->GetAttributesOf(
+                        1,
+                        &pidlConst,
+                        &attributes)) &&
+                    (attributes & SFGAO_LINK);
+
+                if (isLink) {
+                    std::wstring displayName;
+                    std::wstring shortcutPath;
+
+                    if (ShellDisplayNameToString(
+                            desktopFolder,
+                            pidl,
+                            SHGDN_NORMAL,
+                            &displayName) &&
+                        ShellDisplayNameToString(
+                            desktopFolder,
+                            pidl,
+                            SHGDN_FORPARSING,
+                            &shortcutPath)) {
+
+                        std::wstring targetPath;
+                        std::wstring iconPath;
+                        int iconIndex = 0;
+
+                        if (ReadShortcutIconInfo(
+                                shortcutPath,
+                                &targetPath,
+                                &iconPath,
+                                &iconIndex) &&
+                            TargetUsesRunAsAdminLayer(targetPath)) {
+
+                            Wh_Log(
+                                L"RUNASADMIN desktop shortcut: "
+                                L"item=\"%ls\" target=\"%ls\" "
+                                L"icon=\"%ls\" index=%d",
+                                displayName.c_str(),
+                                targetPath.c_str(),
+                                iconPath.c_str(),
+                                iconIndex);
+
+                            HICON rawIcon = ExtractRawShortcutIcon(
+                                iconPath,
+                                iconIndex,
+                                targetPath,
+                                iconWidth,
+                                iconHeight);
+
+                            if (rawIcon) {
+                                int cleanIndex =
+                                    ImageList_AddIcon(
+                                        freshImageList,
+                                        rawIcon);
+                                DestroyIcon(rawIcon);
+
+                                if (cleanIndex >= 0) {
+                                    cleanIndexByName[displayName] =
+                                        cleanIndex;
+                                }
+                            } else {
+                                Wh_Log(
+                                    L"Couldn't extract the raw icon for "
+                                    L"item=\"%ls\"",
+                                    displayName.c_str());
+                            }
+                        }
+                    }
+                }
+
+                CoTaskMemFree(pidl);
+                pidl = nullptr;
+            }
+
+            enumerator->Release();
+        }
+
+        desktopFolder->Release();
+    }
+
+    std::unordered_map<int, int> freshBySystemImage;
+    std::vector<int> freshSignature;
+    int itemCount = ListView_GetItemCount(desktopView);
+    freshSignature.reserve(itemCount > 0 ? itemCount : 0);
+
+    for (int itemIndex = 0; itemIndex < itemCount; itemIndex++) {
+        WCHAR itemName[MAX_PATH] = {};
+        LVITEMW textItem = {};
+        textItem.iSubItem = 0;
+        textItem.pszText = itemName;
+        textItem.cchTextMax = ARRAYSIZE(itemName);
+
+        SendMessageW(
+            desktopView,
+            LVM_GETITEMTEXTW,
+            itemIndex,
+            reinterpret_cast<LPARAM>(&textItem));
+
+        LVITEMW item = {};
+        item.mask = LVIF_IMAGE;
+        item.iItem = itemIndex;
+        item.iSubItem = 0;
+
+        if (!SendMessageW(
+                desktopView,
+                LVM_GETITEMW,
+                0,
+                reinterpret_cast<LPARAM>(&item))) {
+            item.iImage = -1;
+        }
+
+        freshSignature.push_back(item.iImage);
+
+        auto cleanIt = cleanIndexByName.find(itemName);
+        if (cleanIt == cleanIndexByName.end()) {
+            continue;
+        }
+
+        if (item.iImage >= 0) {
+            freshBySystemImage[item.iImage] = cleanIt->second;
+
+            Wh_Log(
+                L"Mapped desktop system image=%d to raw image=%d "
+                L"for item=\"%ls\"",
+                item.iImage,
+                cleanIt->second,
+                itemName);
+        }
+    }
+
+    AcquireSRWLockExclusive(&g_cleanShieldCacheLock);
+
+    if (InterlockedCompareExchange(&g_isUnloading, 0, 0) != 0 ||
+        cacheGeneration != InterlockedCompareExchange(
+            &g_shieldCacheGeneration,
+            0,
+            0)) {
+        ReleaseSRWLockExclusive(&g_cleanShieldCacheLock);
+        ImageList_Destroy(freshImageList);
+        return true;
+    }
+
+    HIMAGELIST oldImageList = g_cleanShieldImageList;
+    g_cleanShieldImageList = freshImageList;
+    g_cleanIconBySystemImage = std::move(freshBySystemImage);
+    g_cachedDesktopSystemImageList = systemImageList;
+    g_cachedDesktopIconWidth = iconWidth;
+    g_cachedDesktopIconHeight = iconHeight;
+    g_cachedDesktopItemCount = itemCount;
+    g_cachedDesktopImageSignature = std::move(freshSignature);
+    UINT replacementCount =
+        static_cast<UINT>(g_cleanIconBySystemImage.size());
+
+    ReleaseSRWLockExclusive(&g_cleanShieldCacheLock);
+
+    if (oldImageList) {
+        ImageList_Destroy(oldImageList);
+    }
+
+    Wh_Log(
+        L"Raw shield-icon cache ready: replacements=%u size=%dx%d",
+        replacementCount,
+        iconWidth,
+        iconHeight);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// IImageList::Draw hook for the already-working desktop shortcut-arrow feature
 // ---------------------------------------------------------------------------
 
 using IImageList_Draw_t =
@@ -328,10 +1005,54 @@ HRESULT STDMETHODCALLTYPE IImageList_Draw_Hook(
     IMAGELISTDRAWPARAMS* drawParams) {
 
     if (g_isDrawingDesktop &&
+        g_settings.hide_shields &&
+        !g_isDrawingCleanShieldIcon &&
+        drawParams) {
+
+        AcquireSRWLockShared(&g_cleanShieldCacheLock);
+
+        auto cleanIt = g_cleanIconBySystemImage.find(drawParams->i);
+
+        bool isDesktopSystemImageList =
+            self == reinterpret_cast<IImageList*>(
+                        g_cachedDesktopSystemImageList) ||
+            drawParams->himl == g_cachedDesktopSystemImageList;
+
+        if (g_cleanShieldImageList &&
+            isDesktopSystemImageList &&
+            cleanIt != g_cleanIconBySystemImage.end()) {
+            IMAGELISTDRAWPARAMS copy = *drawParams;
+            copy.himl = g_cleanShieldImageList;
+            copy.i = cleanIt->second;
+
+            if (g_settings.hide_arrows &&
+                g_linkOverlayMask != 0 &&
+                (copy.fStyle & ILD_OVERLAYMASK) ==
+                    g_linkOverlayMask) {
+                copy.fStyle &= ~ILD_OVERLAYMASK;
+            }
+
+            // ImageList_DrawIndirect dispatches to the implementation that
+            // owns the private image list. Calling the system-image-list
+            // trampoline with this private object is invalid and was the
+            // cause of the previous Explorer crash loop.
+            g_isDrawingCleanShieldIcon = true;
+            BOOL drawn = ImageList_DrawIndirect(&copy);
+            g_isDrawingCleanShieldIcon = false;
+
+            ReleaseSRWLockShared(&g_cleanShieldCacheLock);
+            return drawn ? S_OK : E_FAIL;
+        }
+
+        ReleaseSRWLockShared(&g_cleanShieldCacheLock);
+    }
+
+    if (g_isDrawingDesktop &&
         g_settings.hide_arrows &&
         g_linkOverlayMask != 0 &&
         drawParams &&
-        (drawParams->fStyle & ILD_OVERLAYMASK) == g_linkOverlayMask) {
+        (drawParams->fStyle & ILD_OVERLAYMASK) ==
+            g_linkOverlayMask) {
 
         IMAGELISTDRAWPARAMS copy = *drawParams;
         copy.fStyle &= ~ILD_OVERLAYMASK;
@@ -355,7 +1076,8 @@ static IImageList_Draw_t GetDesktopImageListDrawTarget() {
                 *reinterpret_cast<void***>(imageList);
 
             if (vtable && vtable[8]) {
-                Wh_Log(L"Using the desktop ListView's IImageList::Draw target");
+                Wh_Log(
+                    L"Using the desktop ListView's IImageList::Draw target");
                 return reinterpret_cast<IImageList_Draw_t>(vtable[8]);
             }
         }
@@ -411,223 +1133,6 @@ static IImageList_Draw_t GetDesktopImageListDrawTarget() {
 }
 
 // ---------------------------------------------------------------------------
-// UAC shield removal
-//
-// The shield is not a draw-time overlay. When the shell asks a shortcut for
-// its icon (IExtractIconW::GetIconLocation), the shortcut returns GIL_SHIELD
-// if its target needs elevation, and the shell then composites the shield
-// into a separate system-image-list entry. Stripping it in IImageList::Draw
-// therefore can't work, and any desktop refresh re-extracts the icon and
-// brings the shield back.
-//
-// Fix it at the source: hook the ShellLink object's GetIconLocation and, for
-// shortcuts stored in a desktop folder, replace GIL_SHIELD with
-// GIL_FORCENOSHIELD.
-//
-// IExtractIconW vtable slots:
-//   0 QueryInterface
-//   1 AddRef
-//   2 Release
-//   3 GetIconLocation
-//   4 Extract
-// ---------------------------------------------------------------------------
-
-#ifndef GIL_SHIELD
-#define GIL_SHIELD 0x0200
-#endif
-
-#ifndef GIL_FORCENOSHIELD
-#define GIL_FORCENOSHIELD 0x0400
-#endif
-
-static const GUID kClsidShellLink = {
-    0x00021401, 0x0000, 0x0000,
-    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
-};
-
-static const GUID kIidExtractIconW = {
-    0x000214FA, 0x0000, 0x0000,
-    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
-};
-
-static const GUID kIidPersistFile = {
-    0x0000010B, 0x0000, 0x0000,
-    {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
-};
-
-static const GUID kFolderIdDesktop = {
-    0xB4BFCC3A, 0xDB2C, 0x424C,
-    {0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41}
-};
-
-static const GUID kFolderIdPublicDesktop = {
-    0xC4AA340D, 0xF20F, 0x4863,
-    {0xAF, 0xEF, 0xF8, 0x7E, 0xF2, 0xE6, 0xBA, 0x25}
-};
-
-static std::wstring GetKnownFolder(REFKNOWNFOLDERID id) {
-    std::wstring result;
-    PWSTR path = nullptr;
-
-    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &path)) &&
-        path) {
-        result = path;
-    }
-
-    CoTaskMemFree(path);
-    return result;
-}
-
-static void ResolveDesktopFolders() {
-    g_userDesktopDir = GetKnownFolder(kFolderIdDesktop);
-    g_publicDesktopDir = GetKnownFolder(kFolderIdPublicDesktop);
-
-    Wh_Log(L"Desktop folders: user=%s public=%s",
-           g_userDesktopDir.c_str(),
-           g_publicDesktopDir.c_str());
-}
-
-static bool IsDirectlyInFolder(const std::wstring& filePath,
-                               const std::wstring& folder) {
-    if (folder.empty() || filePath.size() <= folder.size() + 1) {
-        return false;
-    }
-
-    if (_wcsnicmp(filePath.c_str(), folder.c_str(), folder.size()) != 0) {
-        return false;
-    }
-
-    if (filePath[folder.size()] != L'\\') {
-        return false;
-    }
-
-    // Only items directly inside the folder, not in subfolders.
-    return filePath.find(L'\\', folder.size() + 1) == std::wstring::npos;
-}
-
-static bool IsDesktopShortcut(IExtractIconW* self) {
-    IPersistFile* persistFile = nullptr;
-
-    if (FAILED(self->QueryInterface(
-            kIidPersistFile,
-            reinterpret_cast<void**>(&persistFile))) ||
-        !persistFile) {
-        return false;
-    }
-
-    bool result = false;
-    LPOLESTR fileName = nullptr;
-
-    if (persistFile->GetCurFile(&fileName) == S_OK && fileName) {
-        std::wstring path = fileName;
-        result = IsDirectlyInFolder(path, g_userDesktopDir) ||
-                 IsDirectlyInFolder(path, g_publicDesktopDir);
-    }
-
-    CoTaskMemFree(fileName);
-    persistFile->Release();
-
-    return result;
-}
-
-using ExtractIconW_GetIconLocation_t =
-    HRESULT(STDMETHODCALLTYPE*)(IExtractIconW*,
-                                UINT,
-                                PWSTR,
-                                UINT,
-                                int*,
-                                UINT*);
-
-ExtractIconW_GetIconLocation_t ShellLink_GetIconLocation_Original = nullptr;
-
-HRESULT STDMETHODCALLTYPE ShellLink_GetIconLocation_Hook(
-    IExtractIconW* self,
-    UINT flags,
-    PWSTR iconFile,
-    UINT iconFileSize,
-    int* index,
-    UINT* outFlags) {
-
-    HRESULT hr = ShellLink_GetIconLocation_Original(
-        self, flags, iconFile, iconFileSize, index, outFlags);
-
-    if (SUCCEEDED(hr) &&
-        g_settings.hide_shield &&
-        outFlags &&
-        IsDesktopShortcut(self)) {
-        // Set GIL_FORCENOSHIELD even when GIL_SHIELD wasn't returned, so
-        // the shell doesn't add a shield on its own either.
-        *outFlags = (*outFlags & ~GIL_SHIELD) | GIL_FORCENOSHIELD;
-    }
-
-    return hr;
-}
-
-static ExtractIconW_GetIconLocation_t GetShellLinkGetIconLocationTarget() {
-    HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-    ExtractIconW_GetIconLocation_t target = nullptr;
-    IExtractIconW* extractIcon = nullptr;
-
-    if (SUCCEEDED(CoCreateInstance(
-            kClsidShellLink,
-            nullptr,
-            CLSCTX_INPROC_SERVER,
-            kIidExtractIconW,
-            reinterpret_cast<void**>(&extractIcon))) &&
-        extractIcon) {
-
-        void** vtable = *reinterpret_cast<void***>(extractIcon);
-        if (vtable && vtable[3]) {
-            target = reinterpret_cast<ExtractIconW_GetIconLocation_t>(
-                vtable[3]);
-        }
-
-        extractIcon->Release();
-    } else {
-        Wh_Log(L"Couldn't create a ShellLink IExtractIconW instance");
-    }
-
-    if (SUCCEEDED(initHr)) {
-        CoUninitialize();
-    }
-
-    return target;
-}
-
-// Tell the shell to re-extract the icon of every shortcut in the desktop
-// folders, so the change applies without a manual refresh.
-static void NotifyDesktopShortcutsChanged() {
-    for (const std::wstring* folder : {&g_userDesktopDir, &g_publicDesktopDir}) {
-        if (folder->empty()) {
-            continue;
-        }
-
-        std::wstring pattern = *folder + L"\\*.lnk";
-
-        WIN32_FIND_DATAW findData;
-        HANDLE find = FindFirstFileW(pattern.c_str(), &findData);
-        if (find == INVALID_HANDLE_VALUE) {
-            continue;
-        }
-
-        do {
-            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                continue;
-            }
-
-            std::wstring path = *folder + L"\\" + findData.cFileName;
-            SHChangeNotify(SHCNE_UPDATEITEM,
-                           SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
-                           path.c_str(),
-                           nullptr);
-        } while (FindNextFileW(find, &findData));
-
-        FindClose(find);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Desktop subclass
 // ---------------------------------------------------------------------------
 
@@ -641,10 +1146,23 @@ LRESULT CALLBACK DesktopListSubclass(
     if ((uMsg == WM_PAINT || uMsg == WM_PRINTCLIENT) &&
         (g_settings.hide_text ||
          g_settings.hide_all_text ||
-         g_settings.hide_arrows)) {
+         g_settings.hide_arrows ||
+         g_settings.hide_shields)) {
 
         if (g_settings.hide_text && !g_settings.hide_all_text) {
             UpdateShortcutCache();
+        }
+
+        if (g_settings.hide_shields &&
+            ShieldIconCacheNeedsRefresh(hWnd)) {
+            UpdateShieldedShortcutIconCache();
+
+            // Check again shortly whether or not the rebuild ran: it may have
+            // been throttled, or Explorer may still be swapping placeholder
+            // icons for real ones. Without this, a stale map would only be
+            // fixed by the next repaint (e.g. hovering an icon).
+            SetTimer(hWnd, kShieldRefreshTimerId, kShieldRefreshRetryMs,
+                     nullptr);
         }
 
         bool previous = g_isDrawingDesktop;
@@ -655,6 +1173,23 @@ LRESULT CALLBACK DesktopListSubclass(
 
         g_isDrawingDesktop = previous;
         return result;
+    }
+
+    if (uMsg == WM_TIMER && wParam == kShieldRefreshTimerId) {
+        KillTimer(hWnd, kShieldRefreshTimerId);
+
+        if (g_settings.hide_shields &&
+            InterlockedCompareExchange(&g_isUnloading, 0, 0) == 0 &&
+            ShieldIconCacheNeedsRefresh(hWnd)) {
+            if (UpdateShieldedShortcutIconCache()) {
+                InvalidateRect(hWnd, nullptr, FALSE);
+            } else {
+                SetTimer(hWnd, kShieldRefreshTimerId, kShieldRefreshRetryMs,
+                         nullptr);
+            }
+        }
+
+        return 0;
     }
 
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
@@ -683,17 +1218,16 @@ int WINAPI DrawTextW_Hook(
     return DrawTextW_Original(hdc, text, cchText, rect, format);
 }
 
-using DrawThemeTextEx_t =
-    HRESULT(WINAPI*)(
-        HTHEME,
-        HDC,
-        int,
-        int,
-        LPCWSTR,
-        int,
-        DWORD,
-        LPRECT,
-        const void*);
+using DrawThemeTextEx_t = HRESULT(WINAPI*)(
+    HTHEME,
+    HDC,
+    int,
+    int,
+    LPCWSTR,
+    int,
+    DWORD,
+    LPRECT,
+    const void*);
 
 DrawThemeTextEx_t DrawThemeTextEx_Original = nullptr;
 
@@ -771,6 +1305,8 @@ HWND WINAPI CreateWindowExW_Hook(
         param);
 
     if (hWnd && IsDesktopFolderView(hWnd)) {
+        ClearShieldedShortcutIconCache();
+
         WindhawkUtils::SetWindowSubclassFromAnyThread(
             hWnd,
             DesktopListSubclass,
@@ -794,11 +1330,12 @@ static void LoadSettings() {
     g_settings.hide_arrows =
         Wh_GetIntSetting(L"hide_arrows") != 0;
 
-    g_settings.hide_shield =
-        Wh_GetIntSetting(L"hide_shield") != 0;
+    g_settings.hide_shields =
+        Wh_GetIntSetting(L"hide_admin_shields") != 0;
 }
 
 BOOL Wh_ModInit() {
+    InterlockedExchange(&g_isUnloading, 0);
     LoadSettings();
 
     WindhawkUtils::SetFunctionHook(
@@ -807,9 +1344,8 @@ BOOL Wh_ModInit() {
         &CreateWindowExW_Original);
 
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
-        if (auto proc =
-                reinterpret_cast<DrawTextW_t>(
-                    GetProcAddress(user32, "DrawTextW"))) {
+        if (auto proc = reinterpret_cast<DrawTextW_t>(
+                GetProcAddress(user32, "DrawTextW"))) {
             WindhawkUtils::SetFunctionHook(
                 proc,
                 DrawTextW_Hook,
@@ -818,9 +1354,8 @@ BOOL Wh_ModInit() {
     }
 
     if (HMODULE uxTheme = GetModuleHandleW(L"uxtheme.dll")) {
-        if (auto proc =
-                reinterpret_cast<DrawThemeTextEx_t>(
-                    GetProcAddress(uxTheme, "DrawThemeTextEx"))) {
+        if (auto proc = reinterpret_cast<DrawThemeTextEx_t>(
+                GetProcAddress(uxTheme, "DrawThemeTextEx"))) {
             WindhawkUtils::SetFunctionHook(
                 proc,
                 DrawThemeTextEx_Hook,
@@ -828,9 +1363,13 @@ BOOL Wh_ModInit() {
         }
     }
 
-    if (g_settings.hide_arrows) {
+    if (g_settings.hide_arrows ||
+        g_settings.hide_shields) {
         ResolveLinkOverlayMask();
+    }
 
+    if (g_settings.hide_arrows ||
+        g_settings.hide_shields) {
         if (IImageList_Draw_t drawTarget =
                 GetDesktopImageListDrawTarget()) {
             WindhawkUtils::SetFunctionHook(
@@ -839,20 +1378,6 @@ BOOL Wh_ModInit() {
                 &IImageList_Draw_Original);
         } else {
             Wh_Log(L"Couldn't resolve IImageList::Draw target");
-        }
-    }
-
-    if (g_settings.hide_shield) {
-        ResolveDesktopFolders();
-
-        if (ExtractIconW_GetIconLocation_t target =
-                GetShellLinkGetIconLocationTarget()) {
-            WindhawkUtils::SetFunctionHook(
-                target,
-                ShellLink_GetIconLocation_Hook,
-                &ShellLink_GetIconLocation_Original);
-        } else {
-            Wh_Log(L"Couldn't resolve ShellLink GetIconLocation target");
         }
     }
 
@@ -866,16 +1391,19 @@ void Wh_ModAfterInit() {
             DesktopListSubclass,
             0);
 
+        if (g_settings.hide_shields) {
+            UpdateShieldedShortcutIconCache(true);
+        }
+
         InvalidateRect(desktop, nullptr, TRUE);
         UpdateWindow(desktop);
     }
 
-    if (g_settings.hide_shield) {
-        NotifyDesktopShortcutsChanged();
-    }
 }
 
 void Wh_ModUninit() {
+    InterlockedExchange(&g_isUnloading, 1);
+
     if (HWND desktop = GetDesktopFolderView()) {
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(
             desktop,
@@ -884,10 +1412,7 @@ void Wh_ModUninit() {
         InvalidateRect(desktop, nullptr, TRUE);
     }
 
-    if (g_settings.hide_shield) {
-        // Let the shields come back when the mod is disabled.
-        NotifyDesktopShortcutsChanged();
-    }
+    ClearShieldedShortcutIconCache();
 }
 
 BOOL Wh_ModSettingsChanged(BOOL* reload) {
