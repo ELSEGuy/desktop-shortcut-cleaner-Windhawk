@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              desktop-shortcut-cleaner
 // @name            Desktop Shortcut Cleaner
-// @description     Customize desktop icon labels, shortcut arrows, and administrator shields on the Windows desktop without changing File Explorer.
+// @description     Hide desktop shortcut labels, arrows and admin shields, and replace the hover box with an icon-shaped glow, without changing File Explorer.
 // @version         1.2.2
 // @author          ELSEGuy
 // @github          https://github.com/ELSEGuy
@@ -13,27 +13,44 @@
 
 // ==WindhawkModReadme==
 /*
-Desktop Shortcut Cleaner for Windows 11.
+# Desktop Shortcut Cleaner
 
-Features:
-- Hides text only for shortcuts on the Windows desktop.
-- Optional toggle to hide the names of every desktop icon.
-- Hides the standard shortcut arrow only on the desktop.
-- Hides the UAC (admin) shield on desktop shortcuts whose target uses the
-  "Run this program as an administrator" compatibility setting, by drawing
-  the raw icon instead. Stays hidden after refreshing the desktop.
-- Optionally replaces the white hover/selection box behind desktop icons
-  with a soft white glow that follows the icon's shape (brighter when the
-  icon is selected).
-- File Explorer remains unchanged.
+Clean up the Windows 11 desktop without touching File Explorer: hide shortcut
+labels, arrows and administrator shields, and replace the white hover box
+with a soft glow that follows each icon's shape.
 
-Credits:
-Based in part on desktop icon text-hiding code by kivsak.
-The desktop detection and icon-label hiding approach were adapted from their
-script, which hides the names of all desktop icons.
-This project extends that approach with its own shortcut-only label filtering.
-The desktop-only shortcut-arrow handling is implemented separately by this
-project.
+![Hovering and selecting desktop icons shows a soft white glow around each icon's shape instead of the white box](https://raw.githubusercontent.com/ELSEGuy/desktop-shortcut-cleaner-Windhawk/39fa539f259d9b3dff3c2b2d10da7e7cd3cc95be/Screnshot/glow_demo.gif)
+
+## Features
+
+- **Hide shortcut labels only.** Shortcut names are hidden while folders and
+  regular files keep theirs. An optional toggle hides every desktop label.
+- **Hide shortcut arrows** on the desktop only.
+- **Hide administrator shields** on shortcuts whose target uses the
+  *Run this program as an administrator* compatibility setting. The raw icon
+  is drawn instead, and the shield stays hidden after refreshing the desktop.
+  The shortcut still runs as administrator.
+- **Icon glow instead of the hover box.** The white box behind hovered,
+  selected and drop-target icons is removed and replaced with a soft white
+  glow built from the icon's own outline: subtle on hover, brighter when
+  selected.
+- **File Explorer is unchanged.** Arrows, shields, labels and highlights
+  there stay exactly as Windows draws them.
+
+## Before and after
+
+![Desktop before enabling the mod, with shortcut names and arrows](https://raw.githubusercontent.com/ELSEGuy/desktop-shortcut-cleaner-Windhawk/39fa539f259d9b3dff3c2b2d10da7e7cd3cc95be/Screnshot/before.png)
+
+![Desktop with the mod enabled, shortcut names and arrows hidden](https://raw.githubusercontent.com/ELSEGuy/desktop-shortcut-cleaner-Windhawk/39fa539f259d9b3dff3c2b2d10da7e7cd3cc95be/Screnshot/Shortcut_text_and_arrow.png)
+
+## Credits
+
+Based in part on desktop icon text-hiding code by kivsak. The desktop
+detection and icon-label hiding approach were adapted from their script,
+which hides the names of all desktop icons. This project extends that
+approach with its own shortcut-only label filtering. The desktop-only
+shortcut-arrow, administrator-shield and icon-glow handling are implemented
+separately by this project.
 */
 // ==/WindhawkModReadme==
 
