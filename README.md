@@ -2,23 +2,17 @@
 
 A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing File Explorer**.
 
+![Hover and selection glow on desktop icons](Screnshot/glow_demo.gif)
+
 ## Features
 
 - Hide the text labels of **desktop shortcuts only**.
 - Optionally hide the names of **all desktop icons**.
 - Hide the standard shortcut arrow **on the desktop only**.
 - Hide the blue/yellow **UAC (admin) shield** on desktop shortcuts whose target uses the *Run this program as an administrator* compatibility setting. It stays hidden after refreshing the desktop.
+- Replace the white **hover/selection box** behind desktop icons with a **soft white glow that follows the icon's shape**. Hovered icons glow subtly; selected icons and drop targets glow brighter.
 - In shortcut-only mode, **only shortcuts lose their labels**.
-- Shortcut arrows remain visible in File Explorer.
-
-### Default settings
-
-| Setting | Default |
-| --- | --- |
-| Hide desktop shortcut text | On |
-| Hide all desktop icon text | Off |
-| Hide desktop shortcut arrows | On |
-| Hide desktop administrator shields | On |
+- File Explorer keeps its shortcut arrows, shields and normal highlight.
 
 If **Hide all desktop icon text** is enabled, it overrides the shortcut-only text option.
 
@@ -27,6 +21,10 @@ A shortcut to a folder is still a shortcut, so its name is hidden when shortcut-
 ### About the UAC shield
 
 For shortcuts whose target has the *Run this program as an administrator* compatibility setting, Windows bakes the shield into the cached icon image. The mod extracts the shortcut's raw icon and draws it **only on the desktop** instead of the shielded one, so File Explorer is unchanged. The shortcut still runs as administrator. Only the icon changes.
+
+### About the icon glow
+
+The glow is generated from each icon's own transparency: its outline is slightly widened, blurred and filled with white, then drawn underneath the icon, so only the halo outside the icon's shape is visible. The hover strength can be tuned with `kGlowHoverAlpha` in the source (0 = none, 255 = full).
 
 ## Screenshots
 
@@ -73,7 +71,7 @@ The desktop detection and icon-label hiding approach were adapted from their scr
 
 This project extends that approach with its own logic to hide labels **only for shortcuts**, while keeping labels visible for folders and other desktop items.
 
-The desktop-only shortcut-arrow handling is implemented separately by this project.
+The desktop-only shortcut-arrow, administrator-shield and icon-glow handling are implemented separately by this project.
 
 ## License
 
