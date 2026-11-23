@@ -26,6 +26,12 @@ For shortcuts whose target has the *Run this program as an administrator* compat
 
 The glow is generated from each icon's own transparency: its outline is slightly widened, blurred and filled with white, then drawn underneath the icon, so only the halo outside the icon's shape is visible. The hover strength can be tuned with `kGlowHoverAlpha` in the source (0 = none, 255 = full).
 
+## How it differs from similar mods
+
+- **[Hide Desktop Icon Text and Shortcut Arrows](https://windhawk.net/mods/hide-desktop-icon-text)** (kivsak): hides every label except folder names, and removes arrows by editing Explorer's shared icon list, which also affects File Explorer until Explorer restarts. This mod hides only shortcut labels (or all labels), and removes arrows on the desktop only, at draw time, so everything reverts when it's disabled.
+- **[Desktop Icon Selection Style](https://windhawk.net/mods/desktop-icon-selection-style)**: restyles the hover/selection plate. This mod removes the plate and draws a glow shaped like the icon instead. Both hook the same drawing, so don't enable the icon glow together with that mod.
+- **Administrator-shield hiding** isn't offered by any other mod.
+
 ## Known limitations
 
 - Labels are matched by their displayed text, so a non-shortcut item showing the same name as a shortcut (for example `Notes.lnk` and `Notes.txt` with extensions hidden) loses its label too.
