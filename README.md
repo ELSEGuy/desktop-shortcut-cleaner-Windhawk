@@ -2,7 +2,7 @@
 
 A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing File Explorer**.
 
-![Hover and selection glow on desktop icons](Screnshot/glow_demo.gif)
+![Hovering, selecting and dragging desktop icons: icon-shaped glow and solid drag](Screnshot/glow_demo.gif)
 
 ## Features
 
