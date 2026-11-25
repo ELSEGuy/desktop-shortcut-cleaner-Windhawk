@@ -30,12 +30,9 @@ The glow is generated from each icon's own transparency: its outline is slightly
 ## How it differs from similar mods
 
 - **[Hide Desktop Icon Text and Shortcut Arrows](https://windhawk.net/mods/hide-desktop-icon-text)** (kivsak): hides every label except folder names, and removes arrows by editing Explorer's shared icon list, which also affects File Explorer until Explorer restarts. This mod hides only shortcut labels (or all labels), and removes arrows on the desktop only, at draw time, so everything reverts when it's disabled.
-- **[Desktop Icon Selection Style](https://windhawk.net/mods/desktop-icon-selection-style)**: restyles the hover/selection plate. This mod removes the plate and draws a glow shaped like the icon instead. Both hook the same drawing, so don't enable the icon glow together with that mod.
-- **Administrator-shield hiding** isn't offered by any other mod.
 
 ## Known limitations
 
-- Labels are matched by their displayed text, so a non-shortcut item showing the same name as a shortcut (for example `Notes.lnk` and `Notes.txt` with extensions hidden) loses its label too.
 - Shield hiding covers the *Run this program as an administrator* compatibility setting only. Shortcuts to programs whose manifest requests elevation (many installers) keep their shield, as do shortcuts whose target is on a network path.
 
 ## Screenshots
@@ -77,13 +74,7 @@ Windows updates can change Explorer internals, so future Windows builds may requ
 
 ## Credits
 
-Based in part on **desktop icon text-hiding code by [kivsak](https://github.com/kivsak)**, from the *Hide Desktop Icon Text and Shortcut Arrows* mod (MIT license, as published in the Windhawk mods catalog).
-
-The desktop detection and icon-label hiding approach were adapted from their script, which hides the names of all desktop icons.
-
-This project extends that approach with its own logic to hide labels **only for shortcuts**, while keeping labels visible for folders and other desktop items.
-
-The desktop-only shortcut-arrow, administrator-shield, icon-glow and drag handling are implemented separately by this project.
+Desktop detection and label hiding are adapted from [kivsak](https://github.com/kivsak)'s *Hide Desktop Icon Text and Shortcut Arrows* mod (MIT license).
 
 ## License
 
