@@ -10,7 +10,7 @@ A Windows 11 Windhawk mod for cleaning up desktop shortcuts **without changing F
 - Optionally hide the names of **all desktop icons**.
 - Hide the standard shortcut arrow **on the desktop only**.
 - Hide the blue/yellow **UAC (admin) shield** on desktop shortcuts whose target uses the *Run this program as an administrator* compatibility setting. It stays hidden after refreshing the desktop.
-- Replace the white **hover/selection box** behind desktop icons with a **soft white glow that follows the icon's shape**. Hovered icons glow subtly; selected icons and drop targets glow brighter.
+- Replace the white **hover/selection box** behind desktop icons with a **soft white glow that follows the icon's shape**. Hovered icons glow subtly; selected icons and drop targets glow brighter, and the glow fades in and out.
 - **Solid icon while dragging:** icons dragged from the desktop move as a solid icon instead of a faded copy, and the original spot stays empty until you drop. Hidden labels, arrows and shields stay hidden in the dragged image too.
 - In shortcut-only mode, **only shortcuts lose their labels**.
 - File Explorer keeps its shortcut arrows, shields and normal highlight.
